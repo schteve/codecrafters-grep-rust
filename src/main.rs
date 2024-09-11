@@ -4,9 +4,11 @@ use std::process;
 
 fn match_pattern(input_line: &str, pattern: &str) -> bool {
     if pattern.chars().count() == 1 {
-        return input_line.contains(pattern);
+        input_line.contains(pattern)
     } else if pattern == "\\d" {
-        return input_line.contains(|c: char| c.is_ascii_digit())
+        input_line.contains(|c: char| c.is_ascii_digit())
+    } else if pattern == "\\w" {
+        input_line.contains(|c: char| c.is_ascii_alphanumeric())
     } else {
         panic!("Unhandled pattern: {}", pattern)
     }
