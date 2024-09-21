@@ -1,81 +1,121 @@
 use std::{env, io, process};
 
-// fn match_pattern(input_line: &str, pattern: &str) -> bool {
-//     if pattern.chars().count() == 1 {
-//         input_line.contains(pattern)
-//     } else if pattern == "\\d" {
-//         input_line.contains(|c: char| c.is_ascii_digit())
-//     } else if pattern == "\\w" {
-//         input_line.contains(|c: char| c.is_ascii_alphanumeric())
-//     } else if pattern.starts_with('[') && pattern.ends_with(']') {
-//         let p = pattern.trim_start_matches('[').trim_end_matches(']');
-//         if p.starts_with('^') {
-//             let p = p.trim_start_matches('^');
-//             !input_line.contains(|c: char| p.contains(c))
-//         } else {
-//             input_line.contains(|c| p.contains(c))
-//         }
-//     } else {
-//         panic!("Unhandled pattern: {}", pattern)
-//     }
-// }
+#[derive(Debug, Eq, PartialEq)]
+enum ReItem {
+    Char(char),
+    Digit,
+    Alphanum,
+    CharClass(String),
+    NegCharClass(String),
+}
+
+enum CompileState {
+    None,
+    Escaped,
+    CharClassStart,
+    CharClass(String),
+    NegCharClass(String),
+}
+
+fn compile_re(re: &str) -> Vec<ReItem> {
+    let mut items = Vec::new();
+
+    let mut state = CompileState::None;
+    for c in re.chars() {
+        match state {
+            CompileState::None => match c {
+                '\\' => state = CompileState::Escaped,
+                '[' => state = CompileState::CharClassStart,
+                ']' => panic!("Error: found ']' outside of character class"),
+                _ => items.push(ReItem::Char(c)),
+            },
+            CompileState::Escaped => match c {
+                'd' => {
+                    items.push(ReItem::Digit);
+                    state = CompileState::None;
+                }
+                'w' => {
+                    items.push(ReItem::Alphanum);
+                    state = CompileState::None;
+                }
+                '\\' => {
+                    items.push(ReItem::Char(c));
+                    state = CompileState::None;
+                }
+                _ => panic!("Invalid escape: {c}"),
+            },
+            CompileState::CharClassStart => match c {
+                ']' => state = CompileState::None,
+                '^' => state = CompileState::NegCharClass(String::new()),
+                _ => state = CompileState::CharClass(String::from(c)),
+            },
+            CompileState::CharClass(ref mut s) => match c {
+                ']' => {
+                    let cs = std::mem::replace(&mut state, CompileState::None);
+                    let CompileState::CharClass(cc) = cs else {
+                        unreachable!()
+                    };
+                    items.push(ReItem::CharClass(cc));
+                }
+                '\\' | '^' => panic!("Not supported in character class: {c}"),
+                _ => s.push(c),
+            },
+            CompileState::NegCharClass(ref mut s) => match c {
+                ']' => {
+                    let cs = std::mem::replace(&mut state, CompileState::None);
+                    let CompileState::NegCharClass(cc) = cs else {
+                        unreachable!()
+                    };
+                    items.push(ReItem::NegCharClass(cc));
+                }
+                '\\' | '^' => panic!("Not supported in character class: {c}"),
+                _ => s.push(c),
+            },
+        }
+    }
+
+    items
+}
 
 fn match_pattern(text: &str, re: &str) -> bool {
     let mut text_iter = text.chars();
-    let mut re_iter = re.chars();
+    let re_compiled = compile_re(re);
+    let re_iter = re_compiled.iter();
 
-    if re_iter.clone().next() == Some('^') {
-        re_iter.next(); // Consume
-        match_here(text_iter, re_iter)
-    } else {
-        loop {
-            if match_here(text_iter.clone(), re_iter.clone()) {
-                return true;
-            } else if text_iter.next().is_none() {
-                return false;
-            }
+    loop {
+        if match_here(text_iter.clone(), re_iter.clone()) {
+            return true;
+        } else if text_iter.next().is_none() {
+            return false;
         }
     }
 }
 
-fn match_here<C>(mut text_iter: C, mut re_iter: C) -> bool
+fn match_here<'a, C, R>(mut text_iter: C, mut re_iter: R) -> bool
 where
     C: Clone + Iterator<Item = char>,
+    R: Clone + Iterator<Item = &'a ReItem>,
 {
     if let Some(r0) = re_iter.next() {
-        if re_iter.clone().next() == Some('*') {
-            re_iter.next(); // Consume
-            match_star(text_iter, re_iter, r0)
-        } else if let Some(t0) = text_iter.next() {
-            if r0 == '.' || r0 == t0 {
+        if let Some(t0) = text_iter.next() {
+            let matched = match r0 {
+                ReItem::Char(c) => *c == t0,
+                ReItem::Digit => t0.is_ascii_digit(),
+                ReItem::Alphanum => t0.is_ascii_alphanumeric(),
+                ReItem::CharClass(s) => s.contains(t0),
+                ReItem::NegCharClass(s) => !s.contains(t0),
+            };
+
+            if matched {
                 match_here(text_iter, re_iter)
             } else {
                 false // No match
             }
         } else {
-            r0 == '$' // No more input text, only works if at end
+            false // No match, text ran out but regex not matched
         }
     } else {
         true // regex is complete
-    }
-}
-
-fn match_star<C>(mut text_iter: C, re_iter: C, c: char) -> bool
-where
-    C: Clone + Iterator<Item = char>,
-{
-    loop {
-        if match_here(text_iter.clone(), re_iter.clone()) {
-            return true; // Found match
-        } else if let Some(t0) = text_iter.next() {
-            if c == '.' || t0 == c {
-                continue; // Expanding star, try again
-            } else {
-                return false; // Didn't match here and can't expand star, nothing else to try
-            }
-        } else {
-            return false; // No more input text
-        }
     }
 }
 
