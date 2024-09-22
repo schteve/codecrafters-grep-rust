@@ -12,6 +12,7 @@ enum ReItem {
     QuantZeroPlus,
     QuantOnePlus,
     QuantZeroOrOne,
+    Wildcard,
 }
 
 #[derive(Eq, PartialEq)]
@@ -42,6 +43,7 @@ fn compile_re(re: &str) -> Vec<ReItem> {
                 '*' => items.push(ReItem::QuantZeroPlus),
                 '+' => items.push(ReItem::QuantOnePlus),
                 '?' => items.push(ReItem::QuantZeroOrOne),
+                '.' => items.push(ReItem::Wildcard),
                 _ => items.push(ReItem::Char(c)),
             },
             CompileState::Escaped => match c {
@@ -152,6 +154,7 @@ fn match_single(text_char: char, re_item: &ReItem) -> bool {
         ReItem::QuantZeroPlus => panic!("Invalid: quant 0+ not matchable"),
         ReItem::QuantOnePlus => panic!("Invalid: quant 1+ not matchable"),
         ReItem::QuantZeroOrOne => panic!("Invalid: quant 0-1 not matchable"),
+        ReItem::Wildcard => true,
     }
 }
 
