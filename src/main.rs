@@ -7,10 +7,13 @@ enum ReItem {
     Alphanum,
     CharClass(String),
     NegCharClass(String),
+    AnchorStart,
 }
 
+#[derive(Eq, PartialEq)]
 enum CompileState {
     None,
+    Beginning,
     Escaped,
     CharClassStart,
     CharClass(String),
@@ -20,13 +23,17 @@ enum CompileState {
 fn compile_re(re: &str) -> Vec<ReItem> {
     let mut items = Vec::new();
 
-    let mut state = CompileState::None;
+    let mut state = CompileState::Beginning;
     for c in re.chars() {
         match state {
-            CompileState::None => match c {
+            CompileState::None | CompileState::Beginning => match c {
                 '\\' => state = CompileState::Escaped,
                 '[' => state = CompileState::CharClassStart,
                 ']' => panic!("Error: found ']' outside of character class"),
+                '^' if state == CompileState::Beginning => {
+                    items.push(ReItem::AnchorStart);
+                    state = CompileState::None;
+                }
                 _ => items.push(ReItem::Char(c)),
             },
             CompileState::Escaped => match c {
@@ -57,7 +64,7 @@ fn compile_re(re: &str) -> Vec<ReItem> {
                     };
                     items.push(ReItem::CharClass(cc));
                 }
-                '\\' | '^' => panic!("Not supported in character class: {c}"),
+                '\\' => panic!("Not supported in character class: {c}"),
                 _ => s.push(c),
             },
             CompileState::NegCharClass(ref mut s) => match c {
@@ -68,7 +75,7 @@ fn compile_re(re: &str) -> Vec<ReItem> {
                     };
                     items.push(ReItem::NegCharClass(cc));
                 }
-                '\\' | '^' => panic!("Not supported in character class: {c}"),
+                '\\' => panic!("Not supported in character class: {c}"),
                 _ => s.push(c),
             },
         }
@@ -80,13 +87,18 @@ fn compile_re(re: &str) -> Vec<ReItem> {
 fn match_pattern(text: &str, re: &str) -> bool {
     let mut text_iter = text.chars();
     let re_compiled = compile_re(re);
-    let re_iter = re_compiled.iter();
+    let mut re_iter = re_compiled.iter();
 
-    loop {
-        if match_here(text_iter.clone(), re_iter.clone()) {
-            return true;
-        } else if text_iter.next().is_none() {
-            return false;
+    if re_iter.clone().next() == Some(&ReItem::AnchorStart) {
+        re_iter.next(); // Consume
+        match_here(text_iter, re_iter)
+    } else {
+        loop {
+            if match_here(text_iter.clone(), re_iter.clone()) {
+                return true;
+            } else if text_iter.next().is_none() {
+                return false;
+            }
         }
     }
 }
@@ -104,6 +116,7 @@ where
                 ReItem::Alphanum => t0.is_ascii_alphanumeric(),
                 ReItem::CharClass(s) => s.contains(t0),
                 ReItem::NegCharClass(s) => !s.contains(t0),
+                ReItem::AnchorStart => panic!("Invalid: start anchor not at start"),
             };
 
             if matched {
