@@ -8,6 +8,7 @@ enum ReItem {
     CharClass(String),
     NegCharClass(String),
     AnchorStart,
+    AnchorEnd,
 }
 
 #[derive(Eq, PartialEq)]
@@ -34,6 +35,7 @@ fn compile_re(re: &str) -> Vec<ReItem> {
                     items.push(ReItem::AnchorStart);
                     state = CompileState::None;
                 }
+                '$' => items.push(ReItem::AnchorEnd),
                 _ => items.push(ReItem::Char(c)),
             },
             CompileState::Escaped => match c {
@@ -117,6 +119,7 @@ where
                 ReItem::CharClass(s) => s.contains(t0),
                 ReItem::NegCharClass(s) => !s.contains(t0),
                 ReItem::AnchorStart => panic!("Invalid: start anchor not at start"),
+                ReItem::AnchorEnd => false, // Never matches a character
             };
 
             if matched {
@@ -125,7 +128,7 @@ where
                 false // No match
             }
         } else {
-            false // No match, text ran out but regex not matched
+            r0 == &ReItem::AnchorEnd // No more input text, only works if at end
         }
     } else {
         true // regex is complete
