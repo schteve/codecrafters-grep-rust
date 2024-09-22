@@ -10,6 +10,7 @@ enum ReItem {
     AnchorStart,
     AnchorEnd,
     QuantOnePlus,
+    QuantZeroOrOne,
 }
 
 #[derive(Eq, PartialEq)]
@@ -38,6 +39,7 @@ fn compile_re(re: &str) -> Vec<ReItem> {
                 }
                 '$' => items.push(ReItem::AnchorEnd),
                 '+' => items.push(ReItem::QuantOnePlus),
+                '?' => items.push(ReItem::QuantZeroOrOne),
                 _ => items.push(ReItem::Char(c)),
             },
             CompileState::Escaped => match c {
@@ -116,6 +118,9 @@ where
         if re_iter.clone().next() == Some(&ReItem::QuantOnePlus) {
             re_iter.next(); // Consume
             match_quant(r0, 1, usize::MAX, text_iter, re_iter)
+        } else if re_iter.clone().next() == Some(&ReItem::QuantZeroOrOne) {
+            re_iter.next(); // Consume
+            match_quant(r0, 0, 1, text_iter, re_iter)
         } else if let Some(t0) = text_iter.next() {
             if match_single(t0, r0) {
                 match_here(text_iter, re_iter)
@@ -140,6 +145,7 @@ fn match_single(text_char: char, re_item: &ReItem) -> bool {
         ReItem::AnchorStart => panic!("Invalid: start anchor not at start"),
         ReItem::AnchorEnd => false, // Never matches a character
         ReItem::QuantOnePlus => panic!("Invalid: quant 1+ not matchable"),
+        ReItem::QuantZeroOrOne => panic!("Invalid: quant 0-1 not matchable"),
     }
 }
 
