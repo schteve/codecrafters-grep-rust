@@ -9,6 +9,7 @@ enum ReItem {
     NegCharClass(String),
     AnchorStart,
     AnchorEnd,
+    QuantOnePlus,
 }
 
 #[derive(Eq, PartialEq)]
@@ -36,6 +37,7 @@ fn compile_re(re: &str) -> Vec<ReItem> {
                     state = CompileState::None;
                 }
                 '$' => items.push(ReItem::AnchorEnd),
+                '+' => items.push(ReItem::QuantOnePlus),
                 _ => items.push(ReItem::Char(c)),
             },
             CompileState::Escaped => match c {
@@ -111,18 +113,11 @@ where
     R: Clone + Iterator<Item = &'a ReItem>,
 {
     if let Some(r0) = re_iter.next() {
-        if let Some(t0) = text_iter.next() {
-            let matched = match r0 {
-                ReItem::Char(c) => *c == t0,
-                ReItem::Digit => t0.is_ascii_digit(),
-                ReItem::Alphanum => t0.is_ascii_alphanumeric(),
-                ReItem::CharClass(s) => s.contains(t0),
-                ReItem::NegCharClass(s) => !s.contains(t0),
-                ReItem::AnchorStart => panic!("Invalid: start anchor not at start"),
-                ReItem::AnchorEnd => false, // Never matches a character
-            };
-
-            if matched {
+        if re_iter.clone().next() == Some(&ReItem::QuantOnePlus) {
+            re_iter.next(); // Consume
+            match_quant(r0, 1, usize::MAX, text_iter, re_iter)
+        } else if let Some(t0) = text_iter.next() {
+            if match_single(t0, r0) {
                 match_here(text_iter, re_iter)
             } else {
                 false // No match
@@ -133,6 +128,48 @@ where
     } else {
         true // regex is complete
     }
+}
+
+fn match_single(text_char: char, re_item: &ReItem) -> bool {
+    match re_item {
+        ReItem::Char(c) => *c == text_char,
+        ReItem::Digit => text_char.is_ascii_digit(),
+        ReItem::Alphanum => text_char.is_ascii_alphanumeric(),
+        ReItem::CharClass(s) => s.contains(text_char),
+        ReItem::NegCharClass(s) => !s.contains(text_char),
+        ReItem::AnchorStart => panic!("Invalid: start anchor not at start"),
+        ReItem::AnchorEnd => false, // Never matches a character
+        ReItem::QuantOnePlus => panic!("Invalid: quant 1+ not matchable"),
+    }
+}
+
+fn match_quant<'a, C, R>(
+    item: &ReItem,
+    min: usize,
+    max: usize,
+    mut text_iter: C,
+    re_iter: R,
+) -> bool
+where
+    C: Clone + Iterator<Item = char>,
+    R: Clone + Iterator<Item = &'a ReItem>,
+{
+    let mut count = 0;
+    while count <= max {
+        if count >= min && match_here(text_iter.clone(), re_iter.clone()) {
+            return true; // Found match
+        } else if let Some(t0) = text_iter.next() {
+            if match_single(t0, item) {
+                count += 1;
+                continue; // Continue to expand, try again
+            } else {
+                return false; // Didn't match here and can't expand further, nothing else to try
+            }
+        } else {
+            return false; // No more input text
+        }
+    }
+    false
 }
 
 // Usage: echo <input_text> | your_program.sh -E <pattern>
