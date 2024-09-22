@@ -9,6 +9,7 @@ enum ReItem {
     NegCharClass(String),
     AnchorStart,
     AnchorEnd,
+    QuantZeroPlus,
     QuantOnePlus,
     QuantZeroOrOne,
 }
@@ -38,6 +39,7 @@ fn compile_re(re: &str) -> Vec<ReItem> {
                     state = CompileState::None;
                 }
                 '$' => items.push(ReItem::AnchorEnd),
+                '*' => items.push(ReItem::QuantZeroPlus),
                 '+' => items.push(ReItem::QuantOnePlus),
                 '?' => items.push(ReItem::QuantZeroOrOne),
                 _ => items.push(ReItem::Char(c)),
@@ -115,7 +117,10 @@ where
     R: Clone + Iterator<Item = &'a ReItem>,
 {
     if let Some(r0) = re_iter.next() {
-        if re_iter.clone().next() == Some(&ReItem::QuantOnePlus) {
+        if re_iter.clone().next() == Some(&ReItem::QuantZeroPlus) {
+            re_iter.next(); // Consume
+            match_quant(r0, 0, usize::MAX, text_iter, re_iter)
+        } else if re_iter.clone().next() == Some(&ReItem::QuantOnePlus) {
             re_iter.next(); // Consume
             match_quant(r0, 1, usize::MAX, text_iter, re_iter)
         } else if re_iter.clone().next() == Some(&ReItem::QuantZeroOrOne) {
@@ -144,6 +149,7 @@ fn match_single(text_char: char, re_item: &ReItem) -> bool {
         ReItem::NegCharClass(s) => !s.contains(text_char),
         ReItem::AnchorStart => panic!("Invalid: start anchor not at start"),
         ReItem::AnchorEnd => false, // Never matches a character
+        ReItem::QuantZeroPlus => panic!("Invalid: quant 0+ not matchable"),
         ReItem::QuantOnePlus => panic!("Invalid: quant 1+ not matchable"),
         ReItem::QuantZeroOrOne => panic!("Invalid: quant 0-1 not matchable"),
     }
