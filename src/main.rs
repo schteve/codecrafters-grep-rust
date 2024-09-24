@@ -1,4 +1,6 @@
-use std::{env, io, process};
+use std::{env, io, iter::Peekable, process};
+
+type Phrase = Vec<ReItem>;
 
 #[derive(Debug, Eq, PartialEq)]
 enum ReItem {
@@ -13,6 +15,7 @@ enum ReItem {
     QuantOnePlus,
     QuantZeroOrOne,
     Wildcard,
+    Alternative(Vec<Phrase>),
 }
 
 #[derive(Eq, PartialEq)]
@@ -23,13 +26,29 @@ enum CompileState {
     CharClassStart,
     CharClass(String),
     NegCharClass(String),
+    Group,
 }
 
-fn compile_re(re: &str) -> Vec<ReItem> {
+fn compile_re(re: &str) -> Vec<Phrase> {
+    let mut phrases = Vec::new();
+
+    let mut re_iter = re.chars().peekable();
+    while re_iter.peek().is_some() {
+        let phrase = compile_phrase(&mut re_iter);
+        phrases.push(phrase);
+    }
+
+    phrases
+}
+
+fn compile_phrase<R>(re_iter: &mut Peekable<R>) -> Phrase
+where
+    R: Iterator<Item = char>,
+{
     let mut items = Vec::new();
 
     let mut state = CompileState::Beginning;
-    for c in re.chars() {
+    while let Some(&c) = re_iter.peek() {
         match state {
             CompileState::None | CompileState::Beginning => match c {
                 '\\' => state = CompileState::Escaped,
@@ -44,6 +63,8 @@ fn compile_re(re: &str) -> Vec<ReItem> {
                 '+' => items.push(ReItem::QuantOnePlus),
                 '?' => items.push(ReItem::QuantZeroOrOne),
                 '.' => items.push(ReItem::Wildcard),
+                '(' => state = CompileState::Group,
+                '|' | ')' => break, // Let parent deal with it, don't consume
                 _ => items.push(ReItem::Char(c)),
             },
             CompileState::Escaped => match c {
@@ -88,61 +109,103 @@ fn compile_re(re: &str) -> Vec<ReItem> {
                 '\\' => panic!("Not supported in character class: {c}"),
                 _ => s.push(c),
             },
+            CompileState::Group => {
+                let mut grp = Vec::new();
+                loop {
+                    let phrase = compile_phrase(re_iter);
+                    grp.push(phrase);
+
+                    match re_iter.peek() {
+                        Some('|') => {
+                            re_iter.next(); // Consume
+                        }
+                        Some(')') => {
+                            break;
+                        }
+                        Some(x) => panic!("Invalid group close: {x}"),
+                        None => panic!("Group not closed"),
+                    }
+                }
+
+                items.push(ReItem::Alternative(grp));
+                state = CompileState::None;
+            }
         }
+
+        re_iter.next(); // Consume
     }
 
     items
 }
 
 fn match_pattern(text: &str, re: &str) -> bool {
-    let mut text_iter = text.chars();
     let re_compiled = compile_re(re);
-    let mut re_iter = re_compiled.iter();
 
-    if re_iter.clone().next() == Some(&ReItem::AnchorStart) {
+    for phrase in re_compiled.iter() {
+        let text_iter = text.chars();
+        let re_iter = phrase.iter().peekable();
+        if match_phrase(text_iter, re_iter).is_some() {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn match_phrase<'a, C, R>(mut text_iter: C, mut re_iter: Peekable<R>) -> Option<C>
+where
+    C: Clone + Iterator<Item = char>,
+    R: Clone + Iterator<Item = &'a ReItem>,
+{
+    if matches!(re_iter.peek(), Some(ReItem::AnchorStart)) {
         re_iter.next(); // Consume
         match_here(text_iter, re_iter)
     } else {
         loop {
-            if match_here(text_iter.clone(), re_iter.clone()) {
-                return true;
+            let result = match_here(text_iter.clone(), re_iter.clone());
+            if result.is_some() {
+                return result;
             } else if text_iter.next().is_none() {
-                return false;
+                return None;
             }
         }
     }
 }
 
-fn match_here<'a, C, R>(mut text_iter: C, mut re_iter: R) -> bool
+fn match_here<'a, C, R>(mut text_iter: C, mut re_iter: Peekable<R>) -> Option<C>
 where
     C: Clone + Iterator<Item = char>,
     R: Clone + Iterator<Item = &'a ReItem>,
 {
     if let Some(r0) = re_iter.next() {
-        if re_iter.clone().next() == Some(&ReItem::QuantZeroPlus) {
+        if matches!(re_iter.peek(), Some(ReItem::QuantZeroPlus)) {
             re_iter.next(); // Consume
             match_quant(r0, 0, usize::MAX, text_iter, re_iter)
-        } else if re_iter.clone().next() == Some(&ReItem::QuantOnePlus) {
+        } else if matches!(re_iter.peek(), Some(ReItem::QuantOnePlus)) {
             re_iter.next(); // Consume
             match_quant(r0, 1, usize::MAX, text_iter, re_iter)
-        } else if re_iter.clone().next() == Some(&ReItem::QuantZeroOrOne) {
+        } else if matches!(re_iter.peek(), Some(ReItem::QuantZeroOrOne)) {
             re_iter.next(); // Consume
             match_quant(r0, 0, 1, text_iter, re_iter)
+        } else if let ReItem::Alternative(alts) = r0 {
+            match_alts(alts, text_iter, re_iter)
         } else if let Some(t0) = text_iter.next() {
-            if match_single(t0, r0) {
+            if match_char(t0, r0) {
                 match_here(text_iter, re_iter)
             } else {
-                false // No match
+                None // No match
             }
+        } else if r0 == &ReItem::AnchorEnd {
+            Some(text_iter) // No more input text, but at end so it's a match
         } else {
-            r0 == &ReItem::AnchorEnd // No more input text, only works if at end
+            None // No more input text, no match
         }
     } else {
-        true // regex is complete
+        Some(text_iter) // regex is complete
     }
 }
 
-fn match_single(text_char: char, re_item: &ReItem) -> bool {
+fn match_char(text_char: char, re_item: &ReItem) -> bool {
     match re_item {
         ReItem::Char(c) => *c == text_char,
         ReItem::Digit => text_char.is_ascii_digit(),
@@ -155,6 +218,7 @@ fn match_single(text_char: char, re_item: &ReItem) -> bool {
         ReItem::QuantOnePlus => panic!("Invalid: quant 1+ not matchable"),
         ReItem::QuantZeroOrOne => panic!("Invalid: quant 0-1 not matchable"),
         ReItem::Wildcard => true,
+        ReItem::Alternative(_) => panic!("Invalid: alts not matchable"),
     }
 }
 
@@ -163,28 +227,49 @@ fn match_quant<'a, C, R>(
     min: usize,
     max: usize,
     mut text_iter: C,
-    re_iter: R,
-) -> bool
+    re_iter: Peekable<R>,
+) -> Option<C>
 where
     C: Clone + Iterator<Item = char>,
     R: Clone + Iterator<Item = &'a ReItem>,
 {
     let mut count = 0;
     while count <= max {
-        if count >= min && match_here(text_iter.clone(), re_iter.clone()) {
-            return true; // Found match
-        } else if let Some(t0) = text_iter.next() {
-            if match_single(t0, item) {
+        if count >= min {
+            let result = match_here(text_iter.clone(), re_iter.clone());
+            if result.is_some() {
+                return result; // Found match
+            }
+        }
+
+        if let Some(t0) = text_iter.next() {
+            if match_char(t0, item) {
                 count += 1;
                 continue; // Continue to expand, try again
             } else {
-                return false; // Didn't match here and can't expand further, nothing else to try
+                return None; // Didn't match here and can't expand further, nothing else to try
             }
         } else {
-            return false; // No more input text
+            return None; // No more input text
         }
     }
-    false
+    None
+}
+
+fn match_alts<'a, C, R>(alts: &'a [Phrase], text_iter: C, re_iter: Peekable<R>) -> Option<C>
+where
+    C: Clone + Iterator<Item = char>,
+    R: Clone + Iterator<Item = &'a ReItem>,
+{
+    for phrase in alts {
+        if let Some(text_remainder) = match_here(text_iter.clone(), phrase.iter().peekable()) {
+            let result = match_here(text_remainder, re_iter.clone());
+            if result.is_some() {
+                return result;
+            }
+        }
+    }
+    None
 }
 
 // Usage: echo <input_text> | your_program.sh -E <pattern>
@@ -195,8 +280,8 @@ fn main() {
     }
 
     let pattern = env::args().nth(2).unwrap();
-    let mut input_line = String::new();
 
+    let mut input_line = String::new();
     io::stdin().read_line(&mut input_line).unwrap();
 
     if match_pattern(&input_line, &pattern) {
