@@ -15,7 +15,8 @@ enum ReItem {
     QuantOnePlus,
     QuantZeroOrOne,
     Wildcard,
-    Group(Vec<Phrase>),
+    Group(usize, Vec<Phrase>),
+    Backreference(usize),
 }
 
 #[derive(Eq, PartialEq)]
@@ -29,124 +30,148 @@ enum CompileState {
     Group,
 }
 
-fn compile_re(re: &str) -> Vec<Phrase> {
-    let mut phrases = Vec::new();
-
-    let mut re_iter = re.chars().peekable();
-    while re_iter.peek().is_some() {
-        let phrase = compile_phrase(&mut re_iter);
-        phrases.push(phrase);
-    }
-
-    phrases
+struct CompileResult {
+    phrases: Vec<Phrase>,
+    groups: usize,
 }
 
-fn compile_phrase<R>(re_iter: &mut Peekable<R>) -> Phrase
-where
-    R: Iterator<Item = char>,
-{
-    let mut items = Vec::new();
+struct ReCompiler {
+    groups: usize,
+}
 
-    let mut state = CompileState::Beginning;
-    while let Some(&c) = re_iter.peek() {
-        match state {
-            CompileState::None | CompileState::Beginning => match c {
-                '\\' => state = CompileState::Escaped,
-                '[' => state = CompileState::CharClassStart,
-                ']' => panic!("Error: found ']' outside of character class"),
-                '^' if state == CompileState::Beginning => {
-                    items.push(ReItem::AnchorStart);
-                    state = CompileState::None;
-                }
-                '$' => items.push(ReItem::AnchorEnd),
-                '*' => items.push(ReItem::QuantZeroPlus),
-                '+' => items.push(ReItem::QuantOnePlus),
-                '?' => items.push(ReItem::QuantZeroOrOne),
-                '.' => items.push(ReItem::Wildcard),
-                '(' => state = CompileState::Group,
-                '|' | ')' => break, // Let parent deal with it, don't consume
-                _ => items.push(ReItem::Char(c)),
-            },
-            CompileState::Escaped => match c {
-                'd' => {
-                    items.push(ReItem::Digit);
-                    state = CompileState::None;
-                }
-                'w' => {
-                    items.push(ReItem::Alphanum);
-                    state = CompileState::None;
-                }
-                '\\' => {
-                    items.push(ReItem::Char(c));
-                    state = CompileState::None;
-                }
-                _ => panic!("Invalid escape: {c}"),
-            },
-            CompileState::CharClassStart => match c {
-                ']' => state = CompileState::None,
-                '^' => state = CompileState::NegCharClass(String::new()),
-                _ => state = CompileState::CharClass(String::from(c)),
-            },
-            CompileState::CharClass(ref mut s) => match c {
-                ']' => {
-                    let cs = std::mem::replace(&mut state, CompileState::None);
-                    let CompileState::CharClass(cc) = cs else {
-                        unreachable!()
-                    };
-                    items.push(ReItem::CharClass(cc));
-                }
-                '\\' => panic!("Not supported in character class: {c}"),
-                _ => s.push(c),
-            },
-            CompileState::NegCharClass(ref mut s) => match c {
-                ']' => {
-                    let cs = std::mem::replace(&mut state, CompileState::None);
-                    let CompileState::NegCharClass(cc) = cs else {
-                        unreachable!()
-                    };
-                    items.push(ReItem::NegCharClass(cc));
-                }
-                '\\' => panic!("Not supported in character class: {c}"),
-                _ => s.push(c),
-            },
-            CompileState::Group => {
-                let mut grp = Vec::new();
-                loop {
-                    let phrase = compile_phrase(re_iter);
-                    grp.push(phrase);
+impl ReCompiler {
+    fn compile(re: &str) -> CompileResult {
+        let mut compiler = Self { groups: 0 };
 
-                    match re_iter.peek() {
-                        Some('|') => {
-                            re_iter.next(); // Consume
-                        }
-                        Some(')') => {
-                            break;
-                        }
-                        Some(x) => panic!("Invalid group close: {x}"),
-                        None => panic!("Group not closed"),
-                    }
-                }
+        let mut phrases = Vec::new();
 
-                items.push(ReItem::Group(grp));
-                state = CompileState::None;
-            }
+        let mut re_iter = re.chars().peekable();
+        while re_iter.peek().is_some() {
+            let phrase = compiler.compile_phrase(&mut re_iter);
+            phrases.push(phrase);
         }
 
-        re_iter.next(); // Consume
+        CompileResult {
+            phrases,
+            groups: compiler.groups,
+        }
     }
 
-    items
+    fn compile_phrase<R>(&mut self, re_iter: &mut Peekable<R>) -> Phrase
+    where
+        R: Iterator<Item = char>,
+    {
+        let mut items = Vec::new();
+
+        let mut state = CompileState::Beginning;
+        while let Some(&c) = re_iter.peek() {
+            match state {
+                CompileState::None | CompileState::Beginning => match c {
+                    '\\' => state = CompileState::Escaped,
+                    '[' => state = CompileState::CharClassStart,
+                    ']' => panic!("Error: found ']' outside of character class"),
+                    '^' if state == CompileState::Beginning => {
+                        items.push(ReItem::AnchorStart);
+                        state = CompileState::None;
+                    }
+                    '$' => items.push(ReItem::AnchorEnd),
+                    '*' => items.push(ReItem::QuantZeroPlus),
+                    '+' => items.push(ReItem::QuantOnePlus),
+                    '?' => items.push(ReItem::QuantZeroOrOne),
+                    '.' => items.push(ReItem::Wildcard),
+                    '(' => state = CompileState::Group,
+                    '|' | ')' => break, // Let parent deal with it, don't consume
+                    _ => items.push(ReItem::Char(c)),
+                },
+                CompileState::Escaped => match c {
+                    'd' => {
+                        items.push(ReItem::Digit);
+                        state = CompileState::None;
+                    }
+                    'w' => {
+                        items.push(ReItem::Alphanum);
+                        state = CompileState::None;
+                    }
+                    '\\' => {
+                        items.push(ReItem::Char(c));
+                        state = CompileState::None;
+                    }
+                    d if ('1'..='9').contains(&d) => {
+                        items.push(ReItem::Backreference(d.to_digit(10).unwrap() as usize - 1));
+                        state = CompileState::None;
+                    }
+                    _ => panic!("Invalid escape: {c}"),
+                },
+                CompileState::CharClassStart => match c {
+                    ']' => state = CompileState::None,
+                    '^' => state = CompileState::NegCharClass(String::new()),
+                    _ => state = CompileState::CharClass(String::from(c)),
+                },
+                CompileState::CharClass(ref mut s) => match c {
+                    ']' => {
+                        let cs = std::mem::replace(&mut state, CompileState::None);
+                        let CompileState::CharClass(cc) = cs else {
+                            unreachable!()
+                        };
+                        items.push(ReItem::CharClass(cc));
+                    }
+                    '\\' => panic!("Not supported in character class: {c}"),
+                    _ => s.push(c),
+                },
+                CompileState::NegCharClass(ref mut s) => match c {
+                    ']' => {
+                        let cs = std::mem::replace(&mut state, CompileState::None);
+                        let CompileState::NegCharClass(cc) = cs else {
+                            unreachable!()
+                        };
+                        items.push(ReItem::NegCharClass(cc));
+                    }
+                    '\\' => panic!("Not supported in character class: {c}"),
+                    _ => s.push(c),
+                },
+                CompileState::Group => {
+                    let group_n = self.groups;
+                    self.groups += 1;
+
+                    let mut grp = Vec::new();
+                    loop {
+                        let phrase = self.compile_phrase(re_iter);
+                        grp.push(phrase);
+
+                        match re_iter.peek() {
+                            Some('|') => {
+                                re_iter.next(); // Consume
+                            }
+                            Some(')') => {
+                                break;
+                            }
+                            Some(x) => panic!("Invalid group close: {x}"),
+                            None => panic!("Group not closed"),
+                        }
+                    }
+
+                    items.push(ReItem::Group(group_n, grp));
+                    state = CompileState::None;
+                }
+            }
+
+            re_iter.next(); // Consume
+        }
+
+        items
+    }
 }
 
 fn match_pattern(text: &str, re: &str) -> Option<String> {
-    let re_compiled = compile_re(re);
+    let compile_result = ReCompiler::compile(re);
 
-    for phrase in re_compiled.iter() {
+    for phrase in compile_result.phrases.iter() {
         let text_iter = text.chars();
         let re_iter = phrase.iter().peekable();
         let matcher = Matcher {
             text_iter,
             re_iter,
+            backreferences: vec![String::new(); compile_result.groups],
             matched: String::new(),
         };
 
@@ -163,6 +188,7 @@ where
     T: Clone + Iterator<Item = char>,
 {
     matched: String,
+    backreferences: Vec<String>,
     remainder: T,
 }
 
@@ -174,6 +200,7 @@ where
 {
     text_iter: T,
     re_iter: Peekable<R>,
+    backreferences: Vec<String>,
     matched: String,
 }
 
@@ -185,6 +212,7 @@ where
     fn into_result(self) -> MatchResult<T> {
         MatchResult {
             matched: self.matched,
+            backreferences: self.backreferences,
             remainder: self.text_iter,
         }
     }
@@ -216,8 +244,10 @@ where
             } else if matches!(self.re_iter.peek(), Some(ReItem::QuantZeroOrOne)) {
                 self.re_iter.next(); // Consume
                 self.match_quant(r0, 0, 1)
-            } else if let ReItem::Group(alts) = r0 {
-                self.match_group(alts)
+            } else if let ReItem::Group(n, alts) = r0 {
+                self.match_group(*n, alts)
+            } else if let ReItem::Backreference(backref) = r0 {
+                self.match_backref(*backref)
             } else if let Some(t0) = self.text_iter.next() {
                 if match_char(t0, r0) {
                     self.matched.push(t0);
@@ -262,18 +292,28 @@ where
         None
     }
 
-    fn match_group(self, alts: &'a [Phrase]) -> Option<MatchResult<T>> {
+    fn match_group(self, n: usize, alts: &'a [Phrase]) -> Option<MatchResult<T>> {
         for phrase in alts {
             let phrase_matcher = Matcher {
                 text_iter: self.text_iter.clone(),
                 re_iter: phrase.iter().peekable(),
-                matched: self.matched.clone(),
+                backreferences: self.backreferences.clone(),
+                matched: String::new(),
             };
             if let Some(result) = phrase_matcher.match_here() {
+                let mut matched = self.matched.clone();
+                matched.push_str(&result.matched);
+
+                // The result has the latest backreferences - update it and use
+                // it for future matching
+                let mut backreferences = result.backreferences;
+                backreferences[n] = result.matched;
+
                 let remainder_matcher = Matcher {
                     text_iter: result.remainder,
                     re_iter: self.re_iter.clone(),
-                    matched: result.matched,
+                    backreferences,
+                    matched,
                 };
                 let result = remainder_matcher.match_here();
                 if result.is_some() {
@@ -281,7 +321,36 @@ where
                 }
             }
         }
+
         None
+    }
+
+    fn match_backref(self, backref: usize) -> Option<MatchResult<T>> {
+        if let Some(s) = self.backreferences.get(backref) {
+            let re: Vec<_> = s.chars().map(ReItem::Char).collect(); // Match the exact text
+            let backref_matcher = Matcher {
+                text_iter: self.text_iter.clone(),
+                re_iter: re.iter().peekable(),
+                backreferences: self.backreferences.clone(),
+                matched: String::new(),
+            };
+            if let Some(result) = backref_matcher.match_here() {
+                let mut matched = self.matched.clone();
+                matched.push_str(&result.matched);
+
+                let remainder_matcher = Matcher {
+                    text_iter: result.remainder,
+                    re_iter: self.re_iter.clone(),
+                    backreferences: self.backreferences,
+                    matched,
+                };
+                remainder_matcher.match_here()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 }
 
@@ -298,7 +367,8 @@ fn match_char(text_char: char, re_item: &ReItem) -> bool {
         ReItem::QuantOnePlus => panic!("Invalid: quant 1+ not matchable"),
         ReItem::QuantZeroOrOne => panic!("Invalid: quant 0-1 not matchable"),
         ReItem::Wildcard => true,
-        ReItem::Group(_) => panic!("Invalid: alts not matchable"),
+        ReItem::Group(_, _) => panic!("Invalid: alts not matchable"),
+        ReItem::Backreference(_) => panic!("Invalid: backreferences not matchable"),
     }
 }
 
