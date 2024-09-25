@@ -15,7 +15,7 @@ enum ReItem {
     QuantOnePlus,
     QuantZeroOrOne,
     Wildcard,
-    Alternative(Vec<Phrase>),
+    Group(Vec<Phrase>),
 }
 
 #[derive(Eq, PartialEq)]
@@ -127,7 +127,7 @@ where
                     }
                 }
 
-                items.push(ReItem::Alternative(grp));
+                items.push(ReItem::Group(grp));
                 state = CompileState::None;
             }
         }
@@ -138,70 +138,150 @@ where
     items
 }
 
-fn match_pattern(text: &str, re: &str) -> bool {
+fn match_pattern(text: &str, re: &str) -> Option<String> {
     let re_compiled = compile_re(re);
 
     for phrase in re_compiled.iter() {
         let text_iter = text.chars();
         let re_iter = phrase.iter().peekable();
-        if match_phrase(text_iter, re_iter).is_some() {
-            return true;
+        let matcher = Matcher {
+            text_iter,
+            re_iter,
+            matched: String::new(),
+        };
+
+        if let Some(result) = matcher.match_phrase() {
+            return Some(result.matched);
         }
     }
 
-    false
+    None
 }
 
-fn match_phrase<'a, C, R>(mut text_iter: C, mut re_iter: Peekable<R>) -> Option<C>
+struct MatchResult<T>
 where
-    C: Clone + Iterator<Item = char>,
+    T: Clone + Iterator<Item = char>,
+{
+    matched: String,
+    remainder: T,
+}
+
+#[derive(Clone)]
+struct Matcher<'a, T, R>
+where
+    T: Clone + Iterator<Item = char>,
     R: Clone + Iterator<Item = &'a ReItem>,
 {
-    if matches!(re_iter.peek(), Some(ReItem::AnchorStart)) {
-        re_iter.next(); // Consume
-        match_here(text_iter, re_iter)
-    } else {
-        loop {
-            let result = match_here(text_iter.clone(), re_iter.clone());
-            if result.is_some() {
-                return result;
-            } else if text_iter.next().is_none() {
-                return None;
-            }
+    text_iter: T,
+    re_iter: Peekable<R>,
+    matched: String,
+}
+
+impl<'a, T, R> Matcher<'a, T, R>
+where
+    T: Clone + Iterator<Item = char>,
+    R: Clone + Iterator<Item = &'a ReItem>,
+{
+    fn into_result(self) -> MatchResult<T> {
+        MatchResult {
+            matched: self.matched,
+            remainder: self.text_iter,
         }
     }
-}
 
-fn match_here<'a, C, R>(mut text_iter: C, mut re_iter: Peekable<R>) -> Option<C>
-where
-    C: Clone + Iterator<Item = char>,
-    R: Clone + Iterator<Item = &'a ReItem>,
-{
-    if let Some(r0) = re_iter.next() {
-        if matches!(re_iter.peek(), Some(ReItem::QuantZeroPlus)) {
-            re_iter.next(); // Consume
-            match_quant(r0, 0, usize::MAX, text_iter, re_iter)
-        } else if matches!(re_iter.peek(), Some(ReItem::QuantOnePlus)) {
-            re_iter.next(); // Consume
-            match_quant(r0, 1, usize::MAX, text_iter, re_iter)
-        } else if matches!(re_iter.peek(), Some(ReItem::QuantZeroOrOne)) {
-            re_iter.next(); // Consume
-            match_quant(r0, 0, 1, text_iter, re_iter)
-        } else if let ReItem::Alternative(alts) = r0 {
-            match_alts(alts, text_iter, re_iter)
-        } else if let Some(t0) = text_iter.next() {
-            if match_char(t0, r0) {
-                match_here(text_iter, re_iter)
-            } else {
-                None // No match
-            }
-        } else if r0 == &ReItem::AnchorEnd {
-            Some(text_iter) // No more input text, but at end so it's a match
+    fn match_phrase(mut self) -> Option<MatchResult<T>> {
+        if matches!(self.re_iter.peek(), Some(ReItem::AnchorStart)) {
+            self.re_iter.next(); // Consume
+            self.match_here()
         } else {
-            None // No more input text, no match
+            loop {
+                let result = self.clone().match_here();
+                if result.is_some() {
+                    return result;
+                } else if self.text_iter.next().is_none() {
+                    return None;
+                }
+            }
         }
-    } else {
-        Some(text_iter) // regex is complete
+    }
+
+    fn match_here(mut self) -> Option<MatchResult<T>> {
+        if let Some(r0) = self.re_iter.next() {
+            if matches!(self.re_iter.peek(), Some(ReItem::QuantZeroPlus)) {
+                self.re_iter.next(); // Consume
+                self.match_quant(r0, 0, usize::MAX)
+            } else if matches!(self.re_iter.peek(), Some(ReItem::QuantOnePlus)) {
+                self.re_iter.next(); // Consume
+                self.match_quant(r0, 1, usize::MAX)
+            } else if matches!(self.re_iter.peek(), Some(ReItem::QuantZeroOrOne)) {
+                self.re_iter.next(); // Consume
+                self.match_quant(r0, 0, 1)
+            } else if let ReItem::Group(alts) = r0 {
+                self.match_group(alts)
+            } else if let Some(t0) = self.text_iter.next() {
+                if match_char(t0, r0) {
+                    self.matched.push(t0);
+                    self.match_here()
+                } else {
+                    None // No match
+                }
+            } else if r0 == &ReItem::AnchorEnd {
+                // No more input text, but at end so it's a match
+                Some(self.into_result())
+            } else {
+                None // No more input text, no match
+            }
+        } else {
+            // regex is complete
+            Some(self.into_result())
+        }
+    }
+
+    fn match_quant(mut self, item: &ReItem, min: usize, max: usize) -> Option<MatchResult<T>> {
+        let mut count = 0;
+        while count <= max {
+            if count >= min {
+                let result = self.clone().match_here();
+                if result.is_some() {
+                    return result; // Found match
+                }
+            }
+
+            if let Some(t0) = self.text_iter.next() {
+                if match_char(t0, item) {
+                    self.matched.push(t0);
+                    count += 1;
+                    continue; // Continue to expand, try again
+                } else {
+                    return None; // Didn't match here and can't expand further, nothing else to try
+                }
+            } else {
+                return None; // No more input text
+            }
+        }
+        None
+    }
+
+    fn match_group(self, alts: &'a [Phrase]) -> Option<MatchResult<T>> {
+        for phrase in alts {
+            let phrase_matcher = Matcher {
+                text_iter: self.text_iter.clone(),
+                re_iter: phrase.iter().peekable(),
+                matched: self.matched.clone(),
+            };
+            if let Some(result) = phrase_matcher.match_here() {
+                let remainder_matcher = Matcher {
+                    text_iter: result.remainder,
+                    re_iter: self.re_iter.clone(),
+                    matched: result.matched,
+                };
+                let result = remainder_matcher.match_here();
+                if result.is_some() {
+                    return result;
+                }
+            }
+        }
+        None
     }
 }
 
@@ -218,58 +298,8 @@ fn match_char(text_char: char, re_item: &ReItem) -> bool {
         ReItem::QuantOnePlus => panic!("Invalid: quant 1+ not matchable"),
         ReItem::QuantZeroOrOne => panic!("Invalid: quant 0-1 not matchable"),
         ReItem::Wildcard => true,
-        ReItem::Alternative(_) => panic!("Invalid: alts not matchable"),
+        ReItem::Group(_) => panic!("Invalid: alts not matchable"),
     }
-}
-
-fn match_quant<'a, C, R>(
-    item: &ReItem,
-    min: usize,
-    max: usize,
-    mut text_iter: C,
-    re_iter: Peekable<R>,
-) -> Option<C>
-where
-    C: Clone + Iterator<Item = char>,
-    R: Clone + Iterator<Item = &'a ReItem>,
-{
-    let mut count = 0;
-    while count <= max {
-        if count >= min {
-            let result = match_here(text_iter.clone(), re_iter.clone());
-            if result.is_some() {
-                return result; // Found match
-            }
-        }
-
-        if let Some(t0) = text_iter.next() {
-            if match_char(t0, item) {
-                count += 1;
-                continue; // Continue to expand, try again
-            } else {
-                return None; // Didn't match here and can't expand further, nothing else to try
-            }
-        } else {
-            return None; // No more input text
-        }
-    }
-    None
-}
-
-fn match_alts<'a, C, R>(alts: &'a [Phrase], text_iter: C, re_iter: Peekable<R>) -> Option<C>
-where
-    C: Clone + Iterator<Item = char>,
-    R: Clone + Iterator<Item = &'a ReItem>,
-{
-    for phrase in alts {
-        if let Some(text_remainder) = match_here(text_iter.clone(), phrase.iter().peekable()) {
-            let result = match_here(text_remainder, re_iter.clone());
-            if result.is_some() {
-                return result;
-            }
-        }
-    }
-    None
 }
 
 // Usage: echo <input_text> | your_program.sh -E <pattern>
@@ -284,7 +314,8 @@ fn main() {
     let mut input_line = String::new();
     io::stdin().read_line(&mut input_line).unwrap();
 
-    if match_pattern(&input_line, &pattern) {
+    if let Some(matched) = match_pattern(&input_line, &pattern) {
+        println!("Matched: \"{matched}\"");
         process::exit(0)
     } else {
         process::exit(1)
