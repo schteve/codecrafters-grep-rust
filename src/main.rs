@@ -1,4 +1,8 @@
-use std::{env, io, iter::Peekable, process};
+use std::{
+    env, io,
+    iter::{self, Peekable},
+    process,
+};
 
 type Phrase = Vec<ReItem>;
 
@@ -237,13 +241,13 @@ where
         if let Some(r0) = self.re_iter.next() {
             if matches!(self.re_iter.peek(), Some(ReItem::QuantZeroPlus)) {
                 self.re_iter.next(); // Consume
-                self.match_quant(r0, 0, usize::MAX)
+                self.match_quant_greedy(r0, 0, usize::MAX)
             } else if matches!(self.re_iter.peek(), Some(ReItem::QuantOnePlus)) {
                 self.re_iter.next(); // Consume
-                self.match_quant(r0, 1, usize::MAX)
+                self.match_quant_greedy(r0, 1, usize::MAX)
             } else if matches!(self.re_iter.peek(), Some(ReItem::QuantZeroOrOne)) {
                 self.re_iter.next(); // Consume
-                self.match_quant(r0, 0, 1)
+                self.match_quant_greedy(r0, 0, 1)
             } else if let ReItem::Group(n, alts) = r0 {
                 self.match_group(*n, alts)
             } else if let ReItem::Backreference(backref) = r0 {
@@ -267,7 +271,8 @@ where
         }
     }
 
-    fn match_quant(mut self, item: &ReItem, min: usize, max: usize) -> Option<MatchResult<T>> {
+    #[allow(dead_code)]
+    fn match_quant_lazy(mut self, item: &ReItem, min: usize, max: usize) -> Option<MatchResult<T>> {
         let mut count = 0;
         while count <= max {
             if count >= min {
@@ -290,6 +295,47 @@ where
             }
         }
         None
+    }
+
+    fn match_quant_greedy(self, item: &ReItem, min: usize, max: usize) -> Option<MatchResult<T>> {
+        if max == 0 {
+            return None;
+        }
+
+        let item_matcher = Matcher {
+            text_iter: self.text_iter.clone(),
+            re_iter: iter::once(item).peekable(),
+            backreferences: self.backreferences.clone(),
+            matched: String::new(),
+        };
+        if let Some(result) = item_matcher.match_here() {
+            let mut matched = self.matched.clone();
+            matched.push_str(&result.matched);
+
+            let quant_matcher = Matcher {
+                text_iter: result.remainder.clone(),
+                re_iter: self.re_iter.clone(),
+                backreferences: result.backreferences.clone(),
+                matched: matched.clone(),
+            };
+            let quant_result =
+                quant_matcher.match_quant_greedy(item, min.saturating_sub(1), max - 1);
+            if quant_result.is_some() {
+                quant_result
+            } else {
+                let remainder_matcher = Matcher {
+                    text_iter: result.remainder,
+                    re_iter: self.re_iter.clone(),
+                    backreferences: result.backreferences,
+                    matched,
+                };
+                remainder_matcher.match_here()
+            }
+        } else if min == 0 {
+            self.match_here()
+        } else {
+            None
+        }
     }
 
     fn match_group(self, n: usize, alts: &'a [Phrase]) -> Option<MatchResult<T>> {
