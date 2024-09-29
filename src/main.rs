@@ -6,7 +6,7 @@ use std::{
 
 type Phrase = Vec<ReItem>;
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum ReItem {
     Char(char),
     Digit,
@@ -20,6 +20,7 @@ enum ReItem {
     QuantZeroOrOne,
     Wildcard,
     Group(usize, Vec<Phrase>),
+    GroupEnd(usize),
     Backreference(usize),
 }
 
@@ -175,7 +176,7 @@ fn match_pattern(text: &str, re: &str) -> Option<String> {
         let matcher = Matcher {
             text_iter,
             re_iter,
-            backreferences: vec![String::new(); compile_result.groups],
+            backreferences: vec![Backref::new(); compile_result.groups],
             matched: String::new(),
         };
 
@@ -187,13 +188,29 @@ fn match_pattern(text: &str, re: &str) -> Option<String> {
     None
 }
 
+#[derive(Clone)]
 struct MatchResult<T>
 where
     T: Clone + Iterator<Item = char>,
 {
     matched: String,
-    backreferences: Vec<String>,
+    backreferences: Vec<Backref>,
     remainder: T,
+}
+
+#[derive(Clone)]
+struct Backref {
+    value: String,
+    active: bool, // True if in an active group i.e. matched characters expand the value
+}
+
+impl Backref {
+    fn new() -> Self {
+        Self {
+            value: String::new(),
+            active: false,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -204,7 +221,7 @@ where
 {
     text_iter: T,
     re_iter: Peekable<R>,
-    backreferences: Vec<String>,
+    backreferences: Vec<Backref>,
     matched: String,
 }
 
@@ -250,11 +267,18 @@ where
                 self.match_quant_greedy(r0, 0, 1)
             } else if let ReItem::Group(n, alts) = r0 {
                 self.match_group(*n, alts)
+            } else if let ReItem::GroupEnd(n) = r0 {
+                self.match_group_end(*n)
             } else if let ReItem::Backreference(backref) = r0 {
                 self.match_backref(*backref)
             } else if let Some(t0) = self.text_iter.next() {
                 if match_char(t0, r0) {
                     self.matched.push(t0);
+                    for bref in &mut self.backreferences {
+                        if bref.active {
+                            bref.value.push(t0);
+                        }
+                    }
                     self.match_here()
                 } else {
                     None // No match
@@ -302,31 +326,34 @@ where
             return None;
         }
 
-        let item_matcher = Matcher {
+        let single_matcher = Matcher {
             text_iter: self.text_iter.clone(),
             re_iter: iter::once(item).peekable(),
             backreferences: self.backreferences.clone(),
             matched: String::new(),
         };
-        if let Some(result) = item_matcher.match_here() {
+        if let Some(single_result) = single_matcher.match_here() {
             let mut matched = self.matched.clone();
-            matched.push_str(&result.matched);
+            matched.push_str(&single_result.matched);
 
             let quant_matcher = Matcher {
-                text_iter: result.remainder.clone(),
+                text_iter: single_result.remainder.clone(),
                 re_iter: self.re_iter.clone(),
-                backreferences: result.backreferences.clone(),
+                backreferences: single_result.backreferences.clone(),
                 matched: matched.clone(),
             };
-            let quant_result =
-                quant_matcher.match_quant_greedy(item, min.saturating_sub(1), max - 1);
+            let quant_result = quant_matcher.match_quant_greedy(
+                item,
+                min.saturating_sub(1),
+                max.saturating_sub(1),
+            );
             if quant_result.is_some() {
                 quant_result
             } else {
                 let remainder_matcher = Matcher {
-                    text_iter: result.remainder,
+                    text_iter: single_result.remainder,
                     re_iter: self.re_iter.clone(),
-                    backreferences: result.backreferences,
+                    backreferences: single_result.backreferences,
                     matched,
                 };
                 remainder_matcher.match_here()
@@ -338,62 +365,47 @@ where
         }
     }
 
-    fn match_group(self, n: usize, alts: &'a [Phrase]) -> Option<MatchResult<T>> {
+    fn match_group(mut self, n: usize, alts: &'a [Phrase]) -> Option<MatchResult<T>> {
+        self.backreferences[n].active = true;
+
         for phrase in alts {
+            let mut re_phrase = phrase.clone();
+            re_phrase.push(ReItem::GroupEnd(n));
+            re_phrase.extend(self.re_iter.clone().cloned());
+
             let phrase_matcher = Matcher {
                 text_iter: self.text_iter.clone(),
-                re_iter: phrase.iter().peekable(),
+                re_iter: re_phrase.iter().peekable(),
                 backreferences: self.backreferences.clone(),
-                matched: String::new(),
+                matched: self.matched.clone(),
             };
-            if let Some(result) = phrase_matcher.match_here() {
-                let mut matched = self.matched.clone();
-                matched.push_str(&result.matched);
-
-                // The result has the latest backreferences - update it and use
-                // it for future matching
-                let mut backreferences = result.backreferences;
-                backreferences[n] = result.matched;
-
-                let remainder_matcher = Matcher {
-                    text_iter: result.remainder,
-                    re_iter: self.re_iter.clone(),
-                    backreferences,
-                    matched,
-                };
-                let result = remainder_matcher.match_here();
-                if result.is_some() {
-                    return result;
-                }
+            let phrase_result = phrase_matcher.match_here();
+            if phrase_result.is_some() {
+                return phrase_result;
             }
         }
+
+        self.backreferences[n].active = false;
 
         None
     }
 
+    fn match_group_end(mut self, n: usize) -> Option<MatchResult<T>> {
+        self.backreferences[n].active = false;
+        self.match_here()
+    }
+
     fn match_backref(self, backref: usize) -> Option<MatchResult<T>> {
-        if let Some(s) = self.backreferences.get(backref) {
-            let re: Vec<_> = s.chars().map(ReItem::Char).collect(); // Match the exact text
+        if let Some(bref) = self.backreferences.get(backref) {
+            let mut re_bref: Vec<_> = bref.value.chars().map(ReItem::Char).collect(); // Match the exact text and then the rest
+            re_bref.extend(self.re_iter.clone().cloned());
             let backref_matcher = Matcher {
                 text_iter: self.text_iter.clone(),
-                re_iter: re.iter().peekable(),
+                re_iter: re_bref.iter().peekable(),
                 backreferences: self.backreferences.clone(),
-                matched: String::new(),
+                matched: self.matched.clone(),
             };
-            if let Some(result) = backref_matcher.match_here() {
-                let mut matched = self.matched.clone();
-                matched.push_str(&result.matched);
-
-                let remainder_matcher = Matcher {
-                    text_iter: result.remainder,
-                    re_iter: self.re_iter.clone(),
-                    backreferences: self.backreferences,
-                    matched,
-                };
-                remainder_matcher.match_here()
-            } else {
-                None
-            }
+            backref_matcher.match_here()
         } else {
             None
         }
@@ -414,6 +426,7 @@ fn match_char(text_char: char, re_item: &ReItem) -> bool {
         ReItem::QuantZeroOrOne => panic!("Invalid: quant 0-1 not matchable"),
         ReItem::Wildcard => true,
         ReItem::Group(_, _) => panic!("Invalid: alts not matchable"),
+        ReItem::GroupEnd(_) => panic!("Invalid: end not matchable"),
         ReItem::Backreference(_) => panic!("Invalid: backreferences not matchable"),
     }
 }
